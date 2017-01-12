@@ -364,17 +364,14 @@ private[fs2] object StreamCore {
     final def step: Scope[F,StepResult[F,O2]] =
       Scope.interrupted.flatMap { interrupted =>
         if (interrupted) Scope.pure(StepResult.Failed(Interrupted))
-        else _step(0) match {
-          case Left(r) => Scope.pure(r)
-          case Right(r) => r
-        }
+        else _step(0)
       }
 
-    final def stepOrTrampoline(depth: Int): Either[StepResult[F,O2], Scope[F,StepResult[F,O2]]] =
-      if (depth > 100) Right(step)
+    final def stepOrTrampoline(depth: Int): Scope[F,StepResult[F,O2]] =
+      if (depth > 100) step
       else _step(depth + 1)
 
-    protected def _step(depth: Int): Either[StepResult[F,O2], Scope[F,StepResult[F,O2]]]
+    protected def _step(depth: Int): Scope[F,StepResult[F,O2]]
   }
 
   object Stack {
@@ -390,19 +387,19 @@ private[fs2] object StreamCore {
       def pushNonEmptySegments(s: Catenable[Segment[F,O]]): Stack[F,O,O] =
         Segments(s ++ segments)
 
-      def _step(depth: Int): Either[StepResult[F,O], Scope[F,StepResult[F,O]]] = {
+      def _step(depth: Int): Scope[F,StepResult[F,O]] = {
         segments.uncons match {
-          case None => Left(StepResult.Done)
+          case None => Scope.pure(StepResult.Done)
           case Some((hd, segments)) => hd match {
             case Segment.Fail(err) => Stack.fail[F,O](segments)(err) match {
-              case Left(err) => Left(StepResult.Failed(err))
+              case Left(err) => Scope.pure(StepResult.Failed(err))
               case Right((s, segments)) => Stack.segments(segments).pushAppend(s).stepOrTrampoline(depth)
             }
             case Segment.Emit(chunk) =>
               if (chunk.isEmpty) Stack.segments(segments).stepOrTrampoline(depth)
-              else Left(StepResult.Emits(NonEmptyChunk.fromChunkUnsafe(chunk), StreamCore.segments(segments)))
+              else Scope.pure(StepResult.Emits(NonEmptyChunk.fromChunkUnsafe(chunk), StreamCore.segments(segments)))
             case Segment.Handler(h) => Stack.segments(segments).stepOrTrampoline(depth)
-            case Segment.Append(s) => Right(s.push(NT.Id(), Stack.segments(segments)).flatMap(_.step))
+            case Segment.Append(s) => s.push(NT.Id(), Stack.segments(segments)).flatMap(_.step)
           }
         }
       }
@@ -422,7 +419,7 @@ private[fs2] object StreamCore {
       def pushNonEmptySegments(s: Catenable[Segment[F,O1]]): Stack[F,O1,O2] =
         Map(s ++ segments, f, stack)
 
-      def _step(depth: Int): Either[StepResult[F,O2], Scope[F,StepResult[F,O2]]] =
+      def _step(depth: Int): Scope[F,StepResult[F,O2]] =
         segments.uncons match {
           case None => stack.stepOrTrampoline(depth)
           case Some((hd, segments)) => hd match {
@@ -432,7 +429,7 @@ private[fs2] object StreamCore {
               (try { stack2.pushEmit(f(chunk)) }
                catch { case NonFatal(e) => stack2.pushFail(e) }).stepOrTrampoline(depth)
             case Segment.Append(s) =>
-              Right(s.push(NT.Id(), stack.pushMap(f).pushSegments(segments)).flatMap(_.step))
+              s.push(NT.Id(), stack.pushMap(f).pushSegments(segments)).flatMap(_.step)
             case Segment.Fail(err) => Stack.fail(segments)(err) match {
               case Left(err) => stack.pushFail(err).stepOrTrampoline(depth)
               case Right((hd, segments)) => stack.pushMap(f).pushSegments(segments).pushAppend(hd)
@@ -466,7 +463,7 @@ private[fs2] object StreamCore {
       def pushNonEmptySegments(s: Catenable[Segment[F,O1]]): Stack[F,O1,O2] =
         Bind(s ++ segments, f, stack)
 
-      def _step(depth: Int): Either[StepResult[F,O2], Scope[F,StepResult[F,O2]]] =
+      def _step(depth: Int): Scope[F,StepResult[F,O2]] =
         segments.uncons match {
           case None => stack.stepOrTrampoline(depth)
           case Some((hd, segments)) => hd match {
@@ -481,7 +478,7 @@ private[fs2] object StreamCore {
                    catch { case NonFatal(t) => stack2.pushFail(t) }).stepOrTrampoline(depth)
               }
             case Segment.Append(s) =>
-              Right(s.push(NT.Id(), stack.pushBind(f).pushSegments(segments)).flatMap(_.step))
+              s.push(NT.Id(), stack.pushBind(f).pushSegments(segments)).flatMap(_.step)
             case Segment.Fail(err) => Stack.fail(segments)(err) match {
               case Left(err) => stack.pushFail(err).stepOrTrampoline(depth)
               case Right((hd, segments)) =>
