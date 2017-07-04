@@ -6,7 +6,7 @@ import cats.effect.Effect
 import cats.implicits._
 
 import fs2.async.mutable.Queue
-import fs2.internal.FreeC
+import fs2.internal.{ Algebra, FreeC, NonFatal }
 
 object Pipe {
 
@@ -22,11 +22,13 @@ object Pipe {
         case Some(segment) => Stream.segment(segment).append(prompts)
       }
 
-    def stepf(s: Stream[Read,O]): Read[UO] =
-      s.pull.uncons.flatMap {
-        case None => Pull.pure(None)
-        case Some(s) => Pull.output1(s)
-      }.stream.runLast
+    def stepf(s: Stream[Read,O]): Read[UO] = {
+      val next = Algebra.uncons(s.get[Read,O]).flatMap {
+        case Some((hd,tl)) => Algebra.output1(Some((hd,Stream.fromFreeC(tl))): Option[(Segment[O,Unit],Stream[Read,O])])
+        case None => Algebra.pure[Read,Option[(Segment[O,Unit],Stream[Read,O])],Unit](())
+      }
+      Algebra.runFold_(next, None: UO)((_,y) => y, new Algebra.Scope[Read])
+    }
 
     def go(s: Read[UO]): Stepper[I,O] = Stepper.Suspend { () =>
       s.viewL.get match {
@@ -36,11 +38,11 @@ object Pipe {
         case bound: FreeC.Bind[ReadSegment,_,UO] =>
           val f = bound.asInstanceOf[FreeC.Bind[ReadSegment,Any,UO]].f
           val fx = bound.fx.asInstanceOf[FreeC.Eval[ReadSegment,UO]].fr
-          Stepper.Await(segment => go(FreeC.Bind[ReadSegment,UO,UO](FreeC.Pure(fx(segment)), f)))
+          Stepper.Await(segment => go(try f(Right(fx(segment))) catch { case NonFatal(t) => FreeC.Fail(t)} ))
         case e => sys.error("FreeC.ViewL structure must be Pure(a), Fail(e), or Bind(Eval(fx),k), was: " + e)
       }
     }
-    go(stepf(p.covary[Read].apply(prompts)))
+    go(stepf(prompts.through(p)))
   }
 
   /**
